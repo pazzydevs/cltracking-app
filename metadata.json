@@ -1,0 +1,6 @@
+{
+  "name": "CallTrack CRM Connector",
+  "description": "Monitors and relays phone and WhatsApp call events to an external CRM in real time, with offline local caching and auto-sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
