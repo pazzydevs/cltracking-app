@@ -39,14 +39,22 @@ class CrmClient {
 
     // JSON format requested for POST to /api/call-events
     data class CrmPayload(
+        val clientEventId: String,
         val deviceId: String,
         val agentName: String,
         val source: String,
+        val direction: String,
+        val status: String,
         val contactName: String,
         val phoneNumber: String,
-        val status: String,
-        val timestamp: Long,
-        val duration: Long
+        val appPackage: String?,
+        val startedAt: String?,
+        val endedAt: String?,
+        val durationSeconds: Long,
+        val capturedAt: String,
+        val notificationTitle: String?,
+        val notificationText: String?,
+        val notes: String?
     )
 
     suspend fun sendEvent(settings: UserSettings, event: CallEvent): Boolean {
@@ -55,14 +63,22 @@ class CrmClient {
             Log.d(tag, "Sending call event to CRM endpoint: $endpointUrl (Source: ${event.source}, Status: ${event.status})")
 
             val payload = CrmPayload(
+                clientEventId = event.eventId,
                 deviceId = settings.deviceId,
                 agentName = settings.agentName,
                 source = event.source,
+                direction = event.direction,
+                status = event.status,
                 contactName = event.contactName.ifEmpty { "Unknown" },
                 phoneNumber = event.phoneNumber,
-                status = event.status,
-                timestamp = event.timestamp,
-                duration = event.duration
+                appPackage = event.appPackage,
+                startedAt = event.startedAt,
+                endedAt = event.endedAt,
+                durationSeconds = event.durationSeconds,
+                capturedAt = event.capturedAt,
+                notificationTitle = event.notificationTitle,
+                notificationText = event.notificationText,
+                notes = event.notes ?: "Call event saved"
             )
 
             val jsonAdapter = moshi.adapter(CrmPayload::class.java)
@@ -95,13 +111,9 @@ class CrmClient {
 
     suspend fun testConnection(baseUrl: String, apiKey: String): Boolean {
         return try {
-            // Test connection will attempt a GET request or a POST with mock body to api endpoint
-            // To make it lightweight, let's resolve endpoint and try to see if endpoint exists,
-            // or just make a ping to base URL to see if it resolves and returns a response.
             val endpointUrl = resolveEndpoint(baseUrl)
             Log.d(tag, "Testing connection to: $endpointUrl")
 
-            // Let's perform a lightweight HEAD or GET on the resolved URL
             val requestBuilder = Request.Builder()
                 .url(endpointUrl)
                 .get()
@@ -112,11 +124,8 @@ class CrmClient {
 
             val request = requestBuilder.build()
             client.newCall(request).execute().use { response ->
-                // Even a 404 or 405 means the server exists and is contactable.
-                // 200, 4xx, 5xx are all technically "contacted" versus network timeout/host unreachable which throw exceptions.
                 Log.d(tag, "Test connection response code: ${response.code}")
-                // If we get any HTTP direct response, the base URL is validated and endpoint contactable.
-                true
+                response.code == 200
             }
         } catch (e: Exception) {
             Log.e(tag, "Test connection failed: ${e.message}")

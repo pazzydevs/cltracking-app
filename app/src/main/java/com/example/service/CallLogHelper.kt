@@ -16,7 +16,8 @@ object CallLogHelper {
         val contactName: String,
         val type: String, // INCOMING, ANSWERED, MISSED, OUTGOING
         val duration: Long,
-        val timestamp: Long
+        val timestamp: Long,
+        val rawType: Int = 0
     )
 
     fun getLatestCallLog(context: Context): CallInfo? {
@@ -69,7 +70,8 @@ object CallLogHelper {
                     contactName = name,
                     type = mappedStatus,
                     duration = duration,
-                    timestamp = date
+                    timestamp = date,
+                    rawType = typeCode
                 )
             }
         } catch (e: SecurityException) {

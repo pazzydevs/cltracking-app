@@ -80,14 +80,40 @@ class PhoneStateReceiver : BroadcastReceiver() {
                     }
                     
                     if (successfullyCapturedNewEvent && callInfo != null) {
-                        Log.d(tag, "Recording validated fresh event to repository: Source=PHONE, Status=${callInfo.type}")
+                        val rawType = callInfo.rawType
+                        val duration = callInfo.duration
+                        
+                        val (direction, crmStatus) = when (rawType) {
+                            1 -> { // INCOMING_TYPE
+                                if (duration > 0L) {
+                                    Pair("incoming", "ended")
+                                } else {
+                                    Pair("incoming", "missed")
+                                }
+                            }
+                            2 -> Pair("outgoing", "ended") // OUTGOING_TYPE
+                            3 -> Pair("missed", "missed")  // MISSED_TYPE
+                            5 -> Pair("missed", "declined") // REJECTED_TYPE
+                            else -> {
+                                when (callInfo.type) {
+                                    "ANSWERED", "ENDED" -> Pair("incoming", "ended")
+                                    "OUTGOING" -> Pair("outgoing", "ended")
+                                    "MISSED" -> Pair("missed", "missed")
+                                    else -> Pair("unknown", "unknown")
+                                }
+                            }
+                        }
+
+                        Log.d(tag, "Recording validated fresh event: Source=cellular, Status=$crmStatus, Direction=$direction, RawType=$rawType")
                         repository.recordEvent(
-                            source = "PHONE",
-                            status = callInfo.type,
+                            source = "cellular",
+                            status = crmStatus,
                             phoneNumber = callInfo.number,
                             contactName = callInfo.contactName,
-                            duration = callInfo.duration,
-                            timestamp = callInfo.timestamp
+                            duration = duration,
+                            timestamp = callInfo.timestamp,
+                            direction = direction,
+                            durationSeconds = duration
                         )
                     } else {
                         Log.w(tag, "No new unrecorded call details came through CallLog query after retries (the latest calls are already processed or permissions are missing).")

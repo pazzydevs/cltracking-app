@@ -5,7 +5,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Locale
 
 class CallEventRepository(
     private val callEventDao: CallEventDao,
@@ -37,19 +39,82 @@ class CallEventRepository(
         phoneNumber: String,
         contactName: String,
         duration: Long,
-        timestamp: Long = System.currentTimeMillis()
+        timestamp: Long = System.currentTimeMillis(),
+        
+        // Optional parameters to override defaults
+        direction: String? = null,
+        appPackage: String? = null,
+        startedAt: String? = null,
+        endedAt: String? = null,
+        durationSeconds: Long? = null,
+        capturedAt: String? = null,
+        notificationTitle: String? = null,
+        notificationText: String? = null,
+        notes: String? = null
     ): Pair<CallEvent, Boolean> = withContext(Dispatchers.IO) {
         val settings = settingsManager.settingsFlow.first()
-        val eventId = java.util.UUID.randomUUID().toString()
+
+        // Distinguish cellular, whatsapp, and whatsapp business
+        val mappedSource = when {
+            source.equals("phone", ignoreCase = true) || source.equals("cellular", ignoreCase = true) || source.equals("PHONE", ignoreCase = true) -> "cellular"
+            source.equals("whatsapp_business", ignoreCase = true) || appPackage == "com.whatsapp.w4b" -> "whatsapp_business"
+            source.equals("whatsapp", ignoreCase = true) || appPackage == "com.whatsapp" || source.equals("WHATSAPP", ignoreCase = true) -> "whatsapp"
+            else -> source.lowercase()
+        }
+
+        // Map status and direction if they are not passed
+        val finalDirection = direction ?: when (status.uppercase()) {
+            "ANSWERED", "ENDED" -> "incoming"
+            "INCOMING", "RINGING", "ACTIVE" -> "incoming"
+            "OUTGOING" -> "outgoing"
+            "MISSED", "DECLINED" -> "missed"
+            else -> "unknown"
+        }
+
+        // Mapping to requested statuses: ringing | active | ended | missed | declined | captured | unknown
+        val finalStatus = when (status.uppercase()) {
+            "ANSWERED", "ENDED" -> "ended"
+            "INCOMING" -> "missed"
+            "RINGING" -> "ringing"
+            "ACTIVE" -> "active"
+            "OUTGOING" -> "ended"
+            "MISSED" -> "missed"
+            "DECLINED" -> "declined"
+            "CAPTURED" -> "captured"
+            else -> status.lowercase()
+        }
+
+        val finalDurationSeconds = durationSeconds ?: duration
+
+        // format timestamps to ISO-8601
+        val finalCapturedAt = capturedAt ?: formatIso8601(System.currentTimeMillis())
+        val finalStartedAt = startedAt ?: formatIso8601(timestamp)
+        val finalEndedAt = endedAt ?: if (finalDurationSeconds > 0) {
+            formatIso8601(timestamp + (finalDurationSeconds * 1000))
+        } else {
+            null
+        }
+
+        // Build clientEventId deterministically to prevent duplicate syncs
+        val eventId = generateClientEventId(mappedSource, phoneNumber, timestamp, finalDurationSeconds, finalDirection)
 
         val event = CallEvent(
             eventId = eventId,
             deviceId = settings.deviceId,
             agentName = settings.agentName,
-            source = source,
+            source = mappedSource,
+            direction = finalDirection,
+            status = finalStatus,
             contactName = contactName,
             phoneNumber = phoneNumber,
-            status = status,
+            appPackage = appPackage ?: if (mappedSource.contains("whatsapp")) appPackage ?: "com.whatsapp" else null,
+            startedAt = finalStartedAt,
+            endedAt = finalEndedAt,
+            durationSeconds = finalDurationSeconds,
+            capturedAt = finalCapturedAt,
+            notificationTitle = notificationTitle,
+            notificationText = notificationText,
+            notes = notes ?: if (mappedSource.contains("whatsapp")) "WhatsApp Call Intercepted" else "Cellular Call Captured",
             timestamp = timestamp,
             duration = duration,
             isSynced = false
@@ -57,7 +122,7 @@ class CallEventRepository(
 
         // 1. Store in local Room DB first (offline-first design!)
         callEventDao.insertEvent(event)
-        Log.d(tag, "Saved event locally in Room: $eventId (Number: $phoneNumber, Status: $status)")
+        Log.d(tag, "Saved event locally in Room: $eventId (Number: $phoneNumber, Source: $mappedSource, Direction: $finalDirection, Status: $finalStatus)")
 
         // 2. If settings allow/monitoring is enabled, attempt immediate CRM send
         var syncSuccess = false
@@ -74,6 +139,17 @@ class CallEventRepository(
         }
 
         return@withContext Pair(event.copy(isSynced = syncSuccess), syncSuccess)
+    }
+
+    private fun formatIso8601(timestamp: Long): String {
+        val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+        df.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return df.format(java.util.Date(timestamp))
+    }
+
+    private fun generateClientEventId(source: String, phoneNumber: String, timestamp: Long, duration: Long, direction: String): String {
+        val raw = "$source|$phoneNumber|$timestamp|$duration|$direction"
+        return java.util.UUID.nameUUIDFromBytes(raw.toByteArray(Charsets.UTF_8)).toString()
     }
 
     // Process sync of all unsynced logs inside local database
@@ -100,8 +176,16 @@ class CallEventRepository(
 
     suspend fun hasEventProximity(source: String, timestamp: Long): Boolean = withContext(Dispatchers.IO) {
         // Proximity window of +/- 3 seconds to handle hardware clock skews and rounding differences safely.
-        val count = callEventDao.hasEventProximity(source, timestamp - 3000, timestamp + 3000)
-        return@withContext count > 0
+        val normalizedSource = when {
+            source.equals("phone", ignoreCase = true) || source.equals("cellular", ignoreCase = true) || source.equals("PHONE", ignoreCase = true) -> "cellular"
+            source.equals("whatsapp_business", ignoreCase = true) -> "whatsapp_business"
+            source.equals("whatsapp", ignoreCase = true) || source.equals("WHATSAPP", ignoreCase = true) -> "whatsapp"
+            else -> source.lowercase()
+        }
+        val count = callEventDao.hasEventProximity(normalizedSource, timestamp - 3000, timestamp + 3000)
+        val oldStyleSource = if (normalizedSource == "cellular") "PHONE" else normalizedSource.uppercase()
+        val oldCount = callEventDao.hasEventProximity(oldStyleSource, timestamp - 3000, timestamp + 3000)
+        return@withContext (count > 0 || oldCount > 0)
     }
 
     suspend fun testConnection(baseUrl: String, apiKey: String): Boolean = withContext(Dispatchers.IO) {
