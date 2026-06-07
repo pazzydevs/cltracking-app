@@ -14,6 +14,7 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
 
     private val tag = "WhatsAppInterceptor"
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val processedKeys = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         super.onNotificationPosted(sbn)
@@ -22,6 +23,10 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
         if (pkg != "com.whatsapp" && pkg != "com.whatsapp.w4b") {
             return
         }
+
+        // Clean up old processed keys (older than 10 minutes)
+        val now = System.currentTimeMillis()
+        processedKeys.entries.removeIf { now - it.value > 600000 }
 
         val app = applicationContext as? CallTrackApplication ?: return
         val settingsManager = app.settingsManager
@@ -58,28 +63,6 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
                         title.contains("missed call", ignoreCase = true) ||
                         title.contains("missed group call", ignoreCase = true)
 
-                if (isMissedText || isMissedTitle) {
-                    val contactName = if (isMissedText) title else text
-                    val timestamp = sbn.postTime
-                    val alreadyRecorded = repository.hasEventProximity(crmSource, timestamp)
-                    if (!alreadyRecorded && contactName.isNotEmpty() && contactName != "WhatsApp" && contactName != "WhatsApp Business") {
-                        Log.d(tag, "New missed WHATSAPP call captured: '$contactName' from $pkg")
-                        repository.recordEvent(
-                            source = crmSource,
-                            status = "missed",
-                            phoneNumber = "WhatsApp: $contactName",
-                            contactName = contactName,
-                            duration = 0L,
-                            timestamp = timestamp,
-                            direction = "missed",
-                            appPackage = pkg,
-                            notificationTitle = title,
-                            notificationText = text
-                        )
-                    }
-                    return@launch
-                }
-
                 // Detect Incoming Call
                 val isCallCategory = category == Notification.CATEGORY_CALL
                 val isIncomingText = text.contains("incoming voice call", ignoreCase = true) ||
@@ -92,58 +75,73 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
                         title.contains("incoming video call", ignoreCase = true) ||
                         title.contains("incoming call", ignoreCase = true)
 
-                if (isCallCategory || isIncomingText || isIncomingTitle) {
-                    val contactName = if (isIncomingText) title else text
-                    if (contactName.isNotEmpty() && contactName != "WhatsApp" && contactName != "WhatsApp Business") {
-                        val timestamp = sbn.postTime
-                        val alreadyRecorded = repository.hasEventProximity(crmSource, timestamp)
-                        if (!alreadyRecorded) {
-                            Log.d(tag, "New incoming WHATSAPP call captured: '$contactName' from $pkg")
-                            repository.recordEvent(
-                                source = crmSource,
-                                status = "ringing",
-                                phoneNumber = "WhatsApp: $contactName",
-                                contactName = contactName,
-                                duration = 0L,
-                                timestamp = timestamp,
-                                direction = "incoming",
-                                appPackage = pkg,
-                                notificationTitle = title,
-                                notificationText = text
-                            )
-                        }
-                    }
-                    return@launch
-                }
-
                 // Active or ongoing calls
                 val isCallingText = text.equals("voice call", ignoreCase = true) ||
                         text.equals("video call", ignoreCase = true) ||
                         text.contains("ongoing call", ignoreCase = true) ||
                         text.contains("call in progress", ignoreCase = true)
 
-                if (isCallingText) {
-                    val contactName = title
-                    if (contactName.isNotEmpty() && contactName != "WhatsApp" && contactName != "WhatsApp Business") {
-                        val timestamp = sbn.postTime
-                        val alreadyRecorded = repository.hasEventProximity(crmSource, timestamp)
-                        if (!alreadyRecorded) {
-                            Log.d(tag, "Active ongoing WHATSAPP call captured: '$contactName' from $pkg")
-                            repository.recordEvent(
-                                source = crmSource,
-                                status = "active",
-                                phoneNumber = "WhatsApp: $contactName",
-                                contactName = contactName,
-                                duration = 0L,
-                                timestamp = timestamp,
-                                direction = "incoming",
-                                appPackage = pkg,
-                                notificationTitle = title,
-                                notificationText = text
-                            )
-                        }
-                    }
+                val isMissed = isMissedText || isMissedTitle
+                val isIncoming = isCallCategory || isIncomingText || isIncomingTitle
+                val isActive = isCallingText
+
+                if (!isMissed && !isIncoming && !isActive) {
+                    return@launch
                 }
+
+                val statusLabel = when {
+                    isMissed -> "missed"
+                    isIncoming -> "ringing"
+                    else -> "active"
+                }
+
+                val directionLabel = when {
+                    isMissed -> "missed"
+                    else -> "incoming"
+                }
+
+                val contactName = when {
+                    isMissed -> if (isMissedText) title else text
+                    isIncoming -> if (isIncomingText) title else text
+                    else -> title
+                }
+
+                if (contactName.isEmpty() || contactName == "WhatsApp" || contactName == "WhatsApp Business") {
+                    return@launch
+                }
+
+                // 1. In-memory Duplicate Protection
+                val memoryKey = "${sbn.key}_${contactName}_${pkg}_${statusLabel}"
+                val lastProcessedTime = processedKeys[memoryKey]
+                if (lastProcessedTime != null && (now - lastProcessedTime) < 30000) {
+                    Log.d(tag, "In-memory duplicate protection triggered for $memoryKey. Skipping execution.")
+                    return@launch
+                }
+                processedKeys[memoryKey] = now
+
+                // 2. Database-level Duplicate/Update Check (60 seconds window)
+                val recentEvent = repository.findRecentEvent(crmSource, contactName, sbn.postTime)
+                val timestampToUse = recentEvent?.timestamp ?: sbn.postTime
+
+                if (recentEvent != null && recentEvent.status == statusLabel) {
+                    Log.d(tag, "Database status matches recent event ($statusLabel). Skipping to prevent redundant writes.")
+                    return@launch
+                }
+
+                Log.d(tag, "Recording WHATSAPP call: '$contactName' as $statusLabel ($directionLabel) from $pkg. Reusing timestamp: ${timestampToUse != sbn.postTime}")
+                repository.recordEvent(
+                    source = crmSource,
+                    status = statusLabel,
+                    phoneNumber = "WhatsApp: $contactName",
+                    contactName = contactName,
+                    duration = 0L,
+                    timestamp = timestampToUse,
+                    direction = directionLabel,
+                    appPackage = pkg,
+                    capturedAt = repository.formatIso8601(sbn.postTime),
+                    notificationTitle = title,
+                    notificationText = text
+                )
 
             } catch (e: Exception) {
                 Log.e(tag, "Exception parsing WhatsApp Notification: ${e.message}", e)

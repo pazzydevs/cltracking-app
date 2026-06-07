@@ -64,22 +64,22 @@ class CallEventRepository(
 
         // Map status and direction if they are not passed
         val finalDirection = direction ?: when (status.uppercase()) {
-            "ANSWERED", "ENDED" -> "incoming"
             "INCOMING", "RINGING", "ACTIVE" -> "incoming"
+            "ANSWERED", "ENDED" -> "incoming"
             "OUTGOING" -> "outgoing"
-            "MISSED", "DECLINED" -> "missed"
+            "MISSED" -> "missed"
+            "DECLINED", "REJECTED" -> "missed"
             else -> "unknown"
         }
 
         // Mapping to requested statuses: ringing | active | ended | missed | declined | captured | unknown
         val finalStatus = when (status.uppercase()) {
-            "ANSWERED", "ENDED" -> "ended"
-            "INCOMING" -> "missed"
-            "RINGING" -> "ringing"
+            "INCOMING", "RINGING" -> "ringing"
             "ACTIVE" -> "active"
+            "ANSWERED", "ENDED" -> "ended"
             "OUTGOING" -> "ended"
             "MISSED" -> "missed"
-            "DECLINED" -> "declined"
+            "DECLINED", "REJECTED" -> "declined"
             "CAPTURED" -> "captured"
             else -> status.lowercase()
         }
@@ -87,7 +87,7 @@ class CallEventRepository(
         val finalDurationSeconds = durationSeconds ?: duration
 
         // format timestamps to ISO-8601
-        val finalCapturedAt = capturedAt ?: formatIso8601(System.currentTimeMillis())
+        val finalCapturedAt = capturedAt ?: formatIso8601(timestamp)
         val finalStartedAt = startedAt ?: formatIso8601(timestamp)
         val finalEndedAt = endedAt ?: if (finalDurationSeconds > 0) {
             formatIso8601(timestamp + (finalDurationSeconds * 1000))
@@ -141,7 +141,7 @@ class CallEventRepository(
         return@withContext Pair(event.copy(isSynced = syncSuccess), syncSuccess)
     }
 
-    private fun formatIso8601(timestamp: Long): String {
+    fun formatIso8601(timestamp: Long): String {
         val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
         df.timeZone = java.util.TimeZone.getTimeZone("UTC")
         return df.format(java.util.Date(timestamp))
@@ -186,6 +186,13 @@ class CallEventRepository(
         val oldStyleSource = if (normalizedSource == "cellular") "PHONE" else normalizedSource.uppercase()
         val oldCount = callEventDao.hasEventProximity(oldStyleSource, timestamp - 3000, timestamp + 3000)
         return@withContext (count > 0 || oldCount > 0)
+    }
+
+    suspend fun findRecentEvent(source: String, contactName: String, timestamp: Long): CallEvent? = withContext(Dispatchers.IO) {
+        // Find is within 60 seconds (60000 ms)
+        val minTime = timestamp - 60000
+        val maxTime = timestamp + 60000
+        return@withContext callEventDao.findRecentEvent(source, contactName, minTime, maxTime)
     }
 
     suspend fun testConnection(baseUrl: String, apiKey: String): Boolean = withContext(Dispatchers.IO) {

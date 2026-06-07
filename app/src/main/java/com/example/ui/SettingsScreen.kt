@@ -215,7 +215,7 @@ fun SettingsScreen(
                         }
                         ConnectionState.SUCCESS -> {
                             Icon(Icons.Default.Done, contentDescription = "Success", tint = Color(0xFF2E7D32))
-                            Text("Connection Test Success. Endpoints verified!", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF2E7D32))
+                            Text("Connection Test Success. Settings auto-saved!", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF2E7D32))
                         }
                         ConnectionState.ERROR -> {
                             Icon(Icons.Default.Warning, contentDescription = "Error", tint = MaterialTheme.colorScheme.error)
@@ -232,8 +232,17 @@ fun SettingsScreen(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Button(
-                onClick = { viewModel.testConnection(crmBaseUrl, crmApiKey) },
-                enabled = isUrlValid && connState != ConnectionState.TESTING,
+                onClick = {
+                    viewModel.testConnection(
+                        context = context,
+                        crmBaseUrl = crmBaseUrl,
+                        crmApiKey = crmApiKey,
+                        deviceName = deviceName,
+                        agentName = agentName,
+                        syncIntervalMins = syncIntervalMins
+                    )
+                },
+                enabled = isUrlValid && connState != ConnectionState.TESTING && crmBaseUrl.isNotEmpty() && deviceName.isNotEmpty() && agentName.isNotEmpty(),
                 modifier = Modifier.weight(1.0f).height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
                 shape = RoundedCornerShape(16.dp)

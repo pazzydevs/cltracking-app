@@ -145,13 +145,33 @@ class CallTrackViewModel(
     }
 
     // Test endpoint connection dynamically
-    fun testConnection(baseUrl: String, apiKey: String) {
+    fun testConnection(
+        context: Context,
+        crmBaseUrl: String,
+        crmApiKey: String,
+        deviceName: String,
+        agentName: String,
+        syncIntervalMins: Int
+    ) {
         viewModelScope.launch {
             _connectionState.value = ConnectionState.TESTING
-            val success = repository.testConnection(baseUrl, apiKey)
+            val success = repository.testConnection(crmBaseUrl, crmApiKey)
             if (success) {
                 _connectionState.value = ConnectionState.SUCCESS
                 updateLastSyncTime()
+                
+                // Automatically save settings on success
+                settingsManager.saveSettings(
+                    crmBaseUrl = crmBaseUrl,
+                    crmApiKey = crmApiKey,
+                    deviceName = deviceName,
+                    agentName = agentName,
+                    syncIntervalMins = syncIntervalMins
+                )
+                val currentSettings = settings.value
+                if (currentSettings.monitoringEnabled) {
+                    updateBackgroundOperations(context, true, syncIntervalMins)
+                }
             } else {
                 _connectionState.value = ConnectionState.ERROR
             }

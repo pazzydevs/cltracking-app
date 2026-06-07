@@ -462,16 +462,17 @@ fun CallHistoryItem(event: CallEvent) {
                 modifier = Modifier.weight(1f)
             ) {
                 // Source Badging
+                val isWhatsApp = event.source.equals("whatsapp", ignoreCase = true) || event.source.equals("whatsapp_business", ignoreCase = true)
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
                         .background(
-                            if (event.source == "WHATSAPP") Color(0xFFE8F5E9) else MaterialTheme.colorScheme.secondaryContainer
+                            if (isWhatsApp) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.secondaryContainer
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (event.source == "WHATSAPP") {
+                    if (isWhatsApp) {
                         // Custom WA symbol fallback in text
                         Text(
                             text = "WA",
@@ -519,31 +520,37 @@ fun CallHistoryItem(event: CallEvent) {
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 // Status Badge
+                val normalizedStatus = event.status.uppercase()
+                val statusBgColor = when (normalizedStatus) {
+                    "RINGING" -> Color(0xFFE1F5FE)
+                    "ACTIVE" -> Color(0xFFE0F7FA)
+                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFFE8F5E9)
+                    "MISSED" -> Color(0xFFFFEBEE)
+                    "DECLINED", "REJECTED" -> Color(0xFFECEFF1)
+                    "CAPTURED" -> Color(0xFFF3E5F5)
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
+                val statusTextColor = when (normalizedStatus) {
+                    "RINGING" -> Color(0xFF0288D1)
+                    "ACTIVE" -> Color(0xFF006064)
+                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFF2E7D32)
+                    "MISSED" -> Color(0xFFC62828)
+                    "DECLINED", "REJECTED" -> Color(0xFF37474F)
+                    "CAPTURED" -> Color(0xFF6A1B9A)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            when (event.status) {
-                                "ANSWERED" -> Color(0xFFE8F5E9)
-                                "INCOMING" -> Color(0xFFE1F5FE)
-                                "OUTGOING" -> Color(0xFFFFF3E0)
-                                "MISSED" -> Color(0xFFFFEBEE)
-                                else -> MaterialTheme.colorScheme.surfaceVariant
-                            }
-                        )
+                        .background(statusBgColor)
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = event.status,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
-                        color = when (event.status) {
-                            "ANSWERED" -> Color(0xFF2E7D32)
-                            "INCOMING" -> Color(0xFF0288D1)
-                            "OUTGOING" -> Color(0xFFF57C00)
-                            "MISSED" -> Color(0xFFC62828)
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        }
+                        color = statusTextColor
                     )
                 }
 

@@ -30,6 +30,9 @@ interface CallEventDao {
     @Query("SELECT COUNT(*) FROM call_events WHERE source = :source AND timestamp >= :minTime AND timestamp <= :maxTime")
     suspend fun hasEventProximity(source: String, minTime: Long, maxTime: Long): Int
 
+    @Query("SELECT * FROM call_events WHERE source = :source AND contactName = :contactName AND timestamp >= :minTime AND timestamp <= :maxTime ORDER BY timestamp DESC LIMIT 1")
+    suspend fun findRecentEvent(source: String, contactName: String, minTime: Long, maxTime: Long): CallEvent?
+
     @Query("SELECT COUNT(*) FROM call_events WHERE isSynced = 0")
     fun countPendingSync(): Flow<Int>
 
