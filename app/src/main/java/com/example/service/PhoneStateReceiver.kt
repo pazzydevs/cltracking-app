@@ -88,7 +88,7 @@ class PhoneStateReceiver : BroadcastReceiver() {
                                 if (duration > 0L) {
                                     Pair("incoming", "ended")
                                 } else {
-                                    Pair("incoming", "missed")
+                                    Pair("missed", "missed")
                                 }
                             }
                             2 -> Pair("outgoing", "ended") // OUTGOING_TYPE

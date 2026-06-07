@@ -522,20 +522,18 @@ fun CallHistoryItem(event: CallEvent) {
                 // Status Badge
                 val normalizedStatus = event.status.uppercase()
                 val statusBgColor = when (normalizedStatus) {
-                    "RINGING" -> Color(0xFFE1F5FE)
-                    "ACTIVE" -> Color(0xFFE0F7FA)
-                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFFE8F5E9)
-                    "MISSED" -> Color(0xFFFFEBEE)
-                    "DECLINED", "REJECTED" -> Color(0xFFECEFF1)
+                    "RINGING" -> Color(0xFFFFF9C4) // Yellow gold
+                    "ACTIVE" -> Color(0xFFE0F7FA) // Teal/blue-green
+                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFFE8F5E9) // Green
+                    "MISSED", "DECLINED", "REJECTED" -> Color(0xFFFFEBEE) // Red
                     "CAPTURED" -> Color(0xFFF3E5F5)
                     else -> MaterialTheme.colorScheme.surfaceVariant
                 }
                 val statusTextColor = when (normalizedStatus) {
-                    "RINGING" -> Color(0xFF0288D1)
+                    "RINGING" -> Color(0xFFF57F17) // Dark yellow / gold
                     "ACTIVE" -> Color(0xFF006064)
-                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFF2E7D32)
-                    "MISSED" -> Color(0xFFC62828)
-                    "DECLINED", "REJECTED" -> Color(0xFF37474F)
+                    "ENDED", "ANSWERED", "OUTGOING" -> Color(0xFF2E7D32) // Green
+                    "MISSED", "DECLINED", "REJECTED" -> Color(0xFFC62828) // Red
                     "CAPTURED" -> Color(0xFF6A1B9A)
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }

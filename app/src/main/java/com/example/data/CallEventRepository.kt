@@ -32,7 +32,120 @@ class CallEventRepository(
 
     val lastEvent: Flow<CallEvent?> = callEventDao.getLastEvent()
 
-    // Save and attempt to synchronize event in real time
+    // Helper to identify generic contact names
+    fun isGenericContact(value: String?): Boolean {
+        if (value == null) return true
+        val v = value.trim().lowercase()
+        val genericPhrases = listOf(
+            "incoming voice call",
+            "ongoing voice call",
+            "voice call",
+            "video call",
+            "incoming video call",
+            "ongoing video call",
+            "whatsapp",
+            "whatsapp business",
+            "calling...",
+            "calling",
+            "missed voice call",
+            "missed video call"
+        )
+        return v.isEmpty() || genericPhrases.contains(v) || v.contains("voice call") || v.contains("video call") || v.contains("missed voice") || v.contains("missed video")
+    }
+
+    // Normalizations
+    fun normalizePhone(phone: String?): String {
+        if (phone == null) return ""
+        return phone.trim().lowercase().replace(Regex("[\\s\\-\\(\\)\\+\\[\\]]"), "")
+    }
+
+    fun normalizeContact(contact: String?): String {
+        if (contact == null) return ""
+        val trimmed = contact.trim()
+        if (isGenericContact(trimmed)) {
+            return ""
+        }
+        return trimmed.replace(Regex("\\s+"), " ")
+    }
+
+    // Stable ID generation using Name UUID
+    fun generateStableEventId(source: String, phoneNumber: String, contactName: String): String {
+        val cleanSource = source.lowercase()
+        if (cleanSource == "cellular" || cleanSource == "phone") {
+            val normPhone = normalizePhone(phoneNumber)
+            val key = if (normPhone.isNotEmpty()) {
+                "cellular|$normPhone"
+            } else {
+                val normContact = normalizeContact(contactName).lowercase()
+                "cellular|$normContact"
+            }
+            return java.util.UUID.nameUUIDFromBytes(key.toByteArray(Charsets.UTF_8)).toString()
+        } else {
+            // WhatsApp or WhatsApp Business
+            val normContact = normalizeContact(contactName).lowercase()
+            val normPhone = normalizePhone(phoneNumber)
+            // If contact is present, use contact, else phone
+            val contactOrPhone = if (normContact.isNotEmpty()) normContact else normPhone
+            val key = "$cleanSource|$contactOrPhone"
+            return java.util.UUID.nameUUIDFromBytes(key.toByteArray(Charsets.UTF_8)).toString()
+        }
+    }
+
+    suspend fun findRecentOpenWhatsAppEvent(source: String, fromTime: Long): CallEvent? = withContext(Dispatchers.IO) {
+        return@withContext callEventDao.findRecentOpenWhatsAppEvent(source, fromTime)
+    }
+
+    // Local cleanup function to merge duplicate rows
+    suspend fun cleanupOldDuplicates() = withContext(Dispatchers.IO) {
+        val allEventsList = callEventDao.getAllEventsDirect()
+        if (allEventsList.isEmpty()) return@withContext
+
+        // Group events by stable eventId
+        val grouped = allEventsList.groupBy { event ->
+            generateStableEventId(event.source, event.phoneNumber, event.contactName)
+        }
+
+        for ((stableId, events) in grouped) {
+            if (events.size > 1) {
+                // Delete duplicates and keep the most complete one
+                val sortedEvents = events.sortedWith(compareByDescending<CallEvent> {
+                    when (it.status.lowercase()) {
+                        "ended" -> 3
+                        "missed", "declined" -> 2
+                        "active" -> 1
+                        else -> 0
+                    }
+                }.thenByDescending { it.durationSeconds }
+                 .thenByDescending { it.timestamp })
+
+                val bestEvent = sortedEvents.first()
+
+                for (other in events) {
+                    if (other.eventId != bestEvent.eventId) {
+                        callEventDao.deleteEventById(other.eventId)
+                        Log.d(tag, "Cleaned up duplicate eventId: ${other.eventId} for: ${bestEvent.contactName}")
+                    }
+                }
+
+                if (bestEvent.eventId != stableId) {
+                    val updatedEvent = bestEvent.copy(eventId = stableId)
+                    callEventDao.insertEvent(updatedEvent)
+                    callEventDao.deleteEventById(bestEvent.eventId)
+                    Log.d(tag, "Migrated eventId from ${bestEvent.eventId} to stableId $stableId")
+                }
+            } else {
+                val event = events.first()
+                if (event.eventId != stableId) {
+                    val updatedEvent = event.copy(eventId = stableId)
+                    callEventDao.insertEvent(updatedEvent)
+                    callEventDao.deleteEventById(event.eventId)
+                    Log.d(tag, "Migrated single eventId ${event.eventId} to stableId $stableId")
+                }
+            }
+        }
+    }
+
+    // Save and attempt to synchronize event in real time (one row per contact/source!)
     suspend fun recordEvent(
         source: String,
         status: String,
@@ -50,7 +163,9 @@ class CallEventRepository(
         capturedAt: String? = null,
         notificationTitle: String? = null,
         notificationText: String? = null,
-        notes: String? = null
+        notes: String? = null,
+        clientEventIdOverride: String? = null,
+        callGroupKey: String? = null
     ): Pair<CallEvent, Boolean> = withContext(Dispatchers.IO) {
         val settings = settingsManager.settingsFlow.first()
 
@@ -72,7 +187,6 @@ class CallEventRepository(
             else -> "unknown"
         }
 
-        // Mapping to requested statuses: ringing | active | ended | missed | declined | captured | unknown
         val finalStatus = when (status.uppercase()) {
             "INCOMING", "RINGING" -> "ringing"
             "ACTIVE" -> "active"
@@ -84,19 +198,48 @@ class CallEventRepository(
             else -> status.lowercase()
         }
 
-        val finalDurationSeconds = durationSeconds ?: duration
+        val eventId = clientEventIdOverride ?: generateStableEventId(mappedSource, phoneNumber, contactName)
 
-        // format timestamps to ISO-8601
-        val finalCapturedAt = capturedAt ?: formatIso8601(timestamp)
-        val finalStartedAt = startedAt ?: formatIso8601(timestamp)
-        val finalEndedAt = endedAt ?: if (finalDurationSeconds > 0) {
-            formatIso8601(timestamp + (finalDurationSeconds * 1000))
-        } else {
-            null
+        val existingEvent = callEventDao.getEventById(eventId)
+
+        // Normalize inputs nicely but preserve best contact/phone names
+        var finalContactName = contactName
+        var finalPhoneNumber = phoneNumber
+
+        if (isGenericContact(finalContactName) || finalContactName.isEmpty()) {
+            if (existingEvent != null && !isGenericContact(existingEvent.contactName)) {
+                finalContactName = existingEvent.contactName
+            }
+        }
+        if (finalPhoneNumber.isEmpty() || finalPhoneNumber.startsWith("WhatsApp", ignoreCase = true)) {
+            if (existingEvent != null && existingEvent.phoneNumber.isNotEmpty() && !existingEvent.phoneNumber.startsWith("WhatsApp", ignoreCase = true)) {
+                finalPhoneNumber = existingEvent.phoneNumber
+            }
         }
 
-        // Build clientEventId deterministically to prevent duplicate syncs
-        val eventId = generateClientEventId(mappedSource, phoneNumber, timestamp, finalDurationSeconds, finalDirection)
+        val earliestStartedAt = existingEvent?.startedAt ?: startedAt ?: formatIso8601(timestamp)
+        val latestCapturedAt = capturedAt ?: formatIso8601(timestamp)
+
+        val finalDurationSeconds = if ((durationSeconds ?: duration) > 0) (durationSeconds ?: duration) else (existingEvent?.durationSeconds ?: 0L)
+        val finalDuration = if (duration > 0) duration else (existingEvent?.duration ?: 0L)
+
+        val finalEndedAt = endedAt ?: when {
+            finalDurationSeconds > 0 -> formatIso8601(timestamp + (finalDurationSeconds * 1000))
+            finalStatus in listOf("ended", "missed", "declined") -> formatIso8601(timestamp)
+            else -> existingEvent?.endedAt
+        }
+
+        // Avoid multiple CRM POSTs for the same unchanged state
+        if (existingEvent != null &&
+            existingEvent.status == finalStatus &&
+            existingEvent.direction == finalDirection &&
+            existingEvent.durationSeconds == finalDurationSeconds &&
+            existingEvent.contactName == finalContactName &&
+            existingEvent.phoneNumber == finalPhoneNumber
+        ) {
+            Log.d(tag, "Skip update because state has not changed for: $eventId")
+            return@withContext Pair(existingEvent, existingEvent.isSynced)
+        }
 
         val event = CallEvent(
             eventId = eventId,
@@ -105,26 +248,26 @@ class CallEventRepository(
             source = mappedSource,
             direction = finalDirection,
             status = finalStatus,
-            contactName = contactName,
-            phoneNumber = phoneNumber,
+            contactName = finalContactName,
+            phoneNumber = finalPhoneNumber,
             appPackage = appPackage ?: if (mappedSource.contains("whatsapp")) appPackage ?: "com.whatsapp" else null,
-            startedAt = finalStartedAt,
+            startedAt = earliestStartedAt,
             endedAt = finalEndedAt,
             durationSeconds = finalDurationSeconds,
-            capturedAt = finalCapturedAt,
-            notificationTitle = notificationTitle,
-            notificationText = notificationText,
-            notes = notes ?: if (mappedSource.contains("whatsapp")) "WhatsApp Call Intercepted" else "Cellular Call Captured",
-            timestamp = timestamp,
-            duration = duration,
-            isSynced = false
+            capturedAt = latestCapturedAt,
+            notificationTitle = notificationTitle ?: existingEvent?.notificationTitle,
+            notificationText = notificationText ?: existingEvent?.notificationText,
+            notes = notes ?: existingEvent?.notes ?: if (mappedSource.contains("whatsapp")) "WhatsApp Call Intercepted" else "Cellular Call Captured",
+            timestamp = existingEvent?.timestamp ?: timestamp,
+            duration = finalDuration,
+            isSynced = false // Mark unsynced again so it gets POSTed!
         )
 
-        // 1. Store in local Room DB first (offline-first design!)
+        // 1. Store in local Room DB (updates row if eventId matches)
         callEventDao.insertEvent(event)
-        Log.d(tag, "Saved event locally in Room: $eventId (Number: $phoneNumber, Source: $mappedSource, Direction: $finalDirection, Status: $finalStatus)")
+        Log.d(tag, "Saved event locally in Room: $eventId (Number: $finalPhoneNumber, Source: $mappedSource, Direction: $finalDirection, Status: $finalStatus)")
 
-        // 2. If settings allow/monitoring is enabled, attempt immediate CRM send
+        // 2. If settings allow, attempt dynamic CRM sending
         var syncSuccess = false
         if (settings.monitoringEnabled) {
             syncSuccess = crmClient.sendEvent(settings, event)
@@ -147,11 +290,6 @@ class CallEventRepository(
         return df.format(java.util.Date(timestamp))
     }
 
-    private fun generateClientEventId(source: String, phoneNumber: String, timestamp: Long, duration: Long, direction: String): String {
-        val raw = "$source|$phoneNumber|$timestamp|$duration|$direction"
-        return java.util.UUID.nameUUIDFromBytes(raw.toByteArray(Charsets.UTF_8)).toString()
-    }
-
     // Process sync of all unsynced logs inside local database
     suspend fun syncUnsyncedEvents(): Int = withContext(Dispatchers.IO) {
         val settings = settingsManager.settingsFlow.first()
@@ -167,7 +305,6 @@ class CallEventRepository(
                 callEventDao.markEventAsSynced(event.eventId)
                 successfulSyncs++
             } else {
-                // Stop or continue? We continue to try others, but typically connection issue affects all
                 Log.w(tag, "Failed to sync event ${event.eventId} during bulk resync.")
             }
         }
@@ -175,7 +312,6 @@ class CallEventRepository(
     }
 
     suspend fun hasEventProximity(source: String, timestamp: Long): Boolean = withContext(Dispatchers.IO) {
-        // Proximity window of +/- 3 seconds to handle hardware clock skews and rounding differences safely.
         val normalizedSource = when {
             source.equals("phone", ignoreCase = true) || source.equals("cellular", ignoreCase = true) || source.equals("PHONE", ignoreCase = true) -> "cellular"
             source.equals("whatsapp_business", ignoreCase = true) -> "whatsapp_business"
@@ -186,13 +322,6 @@ class CallEventRepository(
         val oldStyleSource = if (normalizedSource == "cellular") "PHONE" else normalizedSource.uppercase()
         val oldCount = callEventDao.hasEventProximity(oldStyleSource, timestamp - 3000, timestamp + 3000)
         return@withContext (count > 0 || oldCount > 0)
-    }
-
-    suspend fun findRecentEvent(source: String, contactName: String, timestamp: Long): CallEvent? = withContext(Dispatchers.IO) {
-        // Find is within 60 seconds (60000 ms)
-        val minTime = timestamp - 60000
-        val maxTime = timestamp + 60000
-        return@withContext callEventDao.findRecentEvent(source, contactName, minTime, maxTime)
     }
 
     suspend fun testConnection(baseUrl: String, apiKey: String): Boolean = withContext(Dispatchers.IO) {

@@ -100,14 +100,23 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
                     else -> "incoming"
                 }
 
-                val contactName = when {
-                    isMissed -> if (isMissedText) title else text
-                    isIncoming -> if (isIncomingText) title else text
-                    else -> title
+                var contactName = ""
+                if (!repository.isGenericContact(title) && title.trim().isNotEmpty()) {
+                    contactName = title.trim()
+                } else if (!repository.isGenericContact(text) && text.trim().isNotEmpty()) {
+                    contactName = text.trim()
                 }
 
-                if (contactName.isEmpty() || contactName == "WhatsApp" || contactName == "WhatsApp Business") {
-                    return@launch
+                if (contactName.isEmpty()) {
+                    val twoMinutesAgo = sbn.postTime - (2 * 60 * 1000L)
+                    val recentOpen = repository.findRecentOpenWhatsAppEvent(crmSource, twoMinutesAgo)
+                    if (recentOpen != null) {
+                        contactName = recentOpen.contactName
+                        Log.d(tag, "Contact empty but found recent open WhatsApp event for $crmSource: ${recentOpen.contactName}")
+                    } else {
+                        Log.d(tag, "Contact empty and no recent open WhatsApp event found for $crmSource. Skipping notification.")
+                        return@launch
+                    }
                 }
 
                 // 1. In-memory Duplicate Protection
@@ -119,23 +128,14 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
                 }
                 processedKeys[memoryKey] = now
 
-                // 2. Database-level Duplicate/Update Check (60 seconds window)
-                val recentEvent = repository.findRecentEvent(crmSource, contactName, sbn.postTime)
-                val timestampToUse = recentEvent?.timestamp ?: sbn.postTime
-
-                if (recentEvent != null && recentEvent.status == statusLabel) {
-                    Log.d(tag, "Database status matches recent event ($statusLabel). Skipping to prevent redundant writes.")
-                    return@launch
-                }
-
-                Log.d(tag, "Recording WHATSAPP call: '$contactName' as $statusLabel ($directionLabel) from $pkg. Reusing timestamp: ${timestampToUse != sbn.postTime}")
+                Log.d(tag, "Recording WHATSAPP call: '$contactName' as $statusLabel ($directionLabel) from $pkg")
                 repository.recordEvent(
                     source = crmSource,
                     status = statusLabel,
                     phoneNumber = "WhatsApp: $contactName",
                     contactName = contactName,
                     duration = 0L,
-                    timestamp = timestampToUse,
+                    timestamp = sbn.postTime,
                     direction = directionLabel,
                     appPackage = pkg,
                     capturedAt = repository.formatIso8601(sbn.postTime),
